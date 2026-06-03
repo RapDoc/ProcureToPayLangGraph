@@ -1,7 +1,8 @@
 from typing import Any
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
-
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt, Command
 
 class State(TypedDict):
     # Upload
@@ -63,7 +64,7 @@ def classify_documents(state: State) -> dict:
 #Node 3 - OCR Validation
 def ocr_validation(state: State) -> dict:
     # TODO:
-    # Integrate OCR engine (Textract / Tesseract / Azure OCR)
+    # Integrate OCR engine
     # and compute actual confidence score
     
     # Simulate low-confidence scenario on first pass; high confidence after re-upload
@@ -84,37 +85,29 @@ def route_ocr(state: State) -> str:
     return "human_review"
 
 #Node 4 - Human Review Agent
-def human_review_agent(state: State) -> dict:
-    # TODO:
-    # Replace with LangGraph interrupt()
-    # to allow actual human review and field corrections
-    print("OCR output (low confidence):")
-    print('{"po_number": None, "amount": "5?000"}')
-
-    # Simulate: first failure → not_satisfactory; subsequent → satisfactory with corrections
-    prior = state.get("human_review_decision", "")
-    if prior == "":
-        # First encounter: reviewer deems it not satisfactory
-        decision = "not_satisfactory"
-        corrections: dict = {}
-        print("Reviewer decision: NOT SATISFACTORY → requesting re-upload")
-    else:
-        # Should not reach here in normal flow; guard anyway
-        decision = "satisfactory"
-        corrections = {"po_number": "PO-123", "amount": 50000}
-        print("  Reviewer decision: SATISFACTORY")
-        print(f"  Corrections applied: {corrections}")
-
-    return {
-        "human_review_decision": decision,
-        "human_corrections": corrections,
+def human_review_agent(state: State) -> Command:
+    ocr_payload = {
+        "ocr_confidence": state["ocr_confidence"],
+        "raw_ocr_output": {"po_number": None, "amount": "5?000"},
+        "message": "OCR confidence below threshold. Please review and correct or request re-upload.",
     }
+    human_response: dict = interrupt(ocr_payload)
 
-#Condition Human Review
-def route_human_review(state: State) -> str:
-    if state["human_review_decision"] == "satisfactory":
-        return "data_extraction"
-    return "upload_documents"   # trigger re-upload loop
+    decision   = human_response.get("decision", "not_satisfactory")
+    corrections = human_response.get("corrections", {})
+
+    print(f"\n[human_review_agent] Decision: {decision}")
+    if corrections:
+        print(f"  Corrections: {corrections}")
+
+    next_node = "data_extraction" if decision == "satisfactory" else "upload_documents"
+    return Command(
+        update={
+            "human_review_decision": decision,
+            "human_corrections":     corrections,
+        },
+        goto=next_node,
+    )
 
 #Node 5 - Data Extraction
 def data_extraction(state: State) -> dict:
@@ -176,35 +169,29 @@ def three_way_matching(state: State) -> dict:
     }
 
 #Node 8 - Human Approval Agent
-def human_approval_agent(state: State) -> dict:
-    # TODO:
-    # Replace with LangGraph interrupt()
-    # for actual human approval
-    
-    print("  Extracted data :", state.get("extracted_data"))
-    print("  DC summary     :", state.get("dc_summary"))
-    print("  Matching result:", state.get("matching_results"))
-
-    match_status = state.get("matching_results", {}).get("status", "matched")
-    if match_status == "matched":
-        decision = "approve"
-    else:
-        decision = "raise_query"   # escalate to supplier loop on mismatch
-    
-
-    print(f"  Reviewer decision: {decision.upper()}")
-    return {
-        "approval_decision": decision,
+def human_approval_agent(state: State) -> Command:
+    approval_payload = {
+        "extracted_data":  state.get("extracted_data"),
+        "dc_summary":      state.get("dc_summary"),
+        "matching_results": state.get("matching_results"),
+        "message": "Please review and approve, reject, or raise a supplier query.",
     }
 
-#Conditional Approval of Route
-def route_approval(state: State) -> str:
-    d = state["approval_decision"]
-    if d == "approve":
-        return "trigger_payment"
-    if d == "reject":
-        return END
-    return "supplier_loop"   # raise_query
+    human_response: dict = interrupt(approval_payload)
+    decision = human_response.get("decision", "approve")
+    print(f"\n[human_approval_agent] Decision: {decision.upper()}")
+
+    if(decision=="reject"):
+        next_node = END
+    elif(decision=="raise_query"):
+        next_node = "supplier_loop"
+    else:
+        next_node = "trigger_payment"
+        
+    return Command(
+        update={"approval_decision": decision},
+        goto=next_node,
+    )
 
 #Node 9 - Supplier Loop
 def supplier_loop(state: State) -> dict:
@@ -273,25 +260,6 @@ builder.add_conditional_edges(
 )
 
 builder.add_conditional_edges(
-    "human_review",
-    route_human_review,
-    {
-        "data_extraction": "data_extraction",
-        "upload_documents": "upload_documents",
-    },
-)
-
-builder.add_conditional_edges(
-    "human_approval",
-    route_approval,
-    {
-        "trigger_payment": "trigger_payment",
-        "supplier_loop": "supplier_loop",
-        END: END,
-    },
-)
-
-builder.add_conditional_edges(
     "supplier_loop",
     route_supplier,
     {
@@ -301,7 +269,10 @@ builder.add_conditional_edges(
 )
 
 #Compiling Graph
-graph = builder.compile()
+checkpointer = MemorySaver()
+graph = builder.compile(
+    checkpointer=checkpointer
+)
 
 #Initial State defined
 initial_state:State = {
@@ -318,5 +289,22 @@ initial_state:State = {
     "supplier_query_status": "",
 }
 
+config = {"configurable": {"thread_id": "1"}}
+
 #Run graph on initial state
-graph.invoke(initial_state)
+print("Step 1 — Running graph until OCR interrupt")
+result = graph.invoke(initial_state, config)
+print("\nGraph paused. Interrupt payload:", result)
+
+print("Step 2 — Resuming with human OCR review decision")
+ocr_response = Command(resume={
+    "decision":    "satisfactory",
+    "corrections": {"po_number": "PO-123", "amount": 50000},
+})
+result = graph.invoke(ocr_response, config)
+print("\nGraph paused. Interrupt payload:", result)
+
+print("Step 3 — Resuming with human approval decision")
+approval_response = Command(resume={"decision": "approve"})
+result = graph.invoke(approval_response, config)
+print("\nFinal result:", result)
