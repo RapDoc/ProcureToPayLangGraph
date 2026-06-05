@@ -365,6 +365,15 @@ function App() {
 
     const show = (k) => setVis((p) => ({ ...p, [k]: true }));
     const hide = (k) => setVis((p) => ({ ...p, [k]: false }));
+    const [frm, setFrm] = useState({ po: "", amt: "5?000" });
+    const [ext, setExt] = useState({ 
+        po: "PO-123", 
+        inv: "INV-456", 
+        ven: "ABC Ltd", 
+        amt: "₹50,000", 
+        dc: "2", 
+        qty: "15" 
+    });
 
     async function startWorkflow() {
         if (phase !== "uploaded") return;
@@ -403,38 +412,29 @@ function App() {
 
         setPhase("running");
         hide("hitlOCR");
-        setT("human_ocr", "done", d === "satisfactory" ? "accepted" : "re-upload requested", "manual");
+        setT("human_ocr", "done", d === "satisfactory" ? "accepted w/ corrections" : "re-upload requested", "manual");
         setPct(44);
 
         await delay(400);
         setT("extract", "active", "extracting fields...");
 
         await delay(700);
-        setT("extract", "done", "PO-123 · INV-456 · ₹50,000", "0.5s");
+        
+        if (d === "satisfactory") {
+            const npo = frm.po || "PO-123";
+            const nam = frm.amt !== "5?000" ? `₹${frm.amt}` : "₹50,000";
+            
+            setExt(p => ({ ...p, po: npo, amt: nam }));
+            setT("extract", "done", `${npo} · INV-456 · ${nam}`, "0.5s");
+        } else {
+            setT("extract", "done", "PO-123 · INV-456 · ₹50,000", "0.5s");
+        }
+        
         setPct(56);
         show("extract");
 
         await delay(400);
         setT("dc", "active", "parsing delivery challans...");
-
-        await delay(600);
-        setT("dc", "done", "2 DCs · qty 15", "0.3s");
-        setPct(66);
-
-        await delay(400);
-        setT("match", "active", "running 3-way match...");
-
-        await delay(700);
-        setT("match", "done", "matched ✓", "0.5s");
-        setPct(76);
-        setMatchSt("matched");
-        setApprovSt("pending");
-        show("result");
-
-        await delay(300);
-        setT("approval", "hitl", "awaiting approval");
-        show("hitlApproval");
-        setPhase("hitl_approval");
     }
 
     async function resolveApproval(d) {
@@ -618,17 +618,41 @@ function App() {
                 HitlBanner,
                 {
                     title: "OCR confidence below threshold",
-                    note: "Confidence 65% · threshold 75% · fields: po_number null, amount '5?000'",
+                    note: "Confidence 65% · threshold 75% · Edit fields before approving",
                 },
                 React.createElement(
-                    Btn,
-                    { variant: "green", onClick: () => resolveOCR("satisfactory") },
-                    "✓ Satisfactory"
-                ),
-                React.createElement(
-                    Btn,
-                    { variant: "red", onClick: () => resolveOCR("not_satisfactory") },
-                    "↺ Request re-upload"
+                    "div",
+                    { style: { display: "flex", flexDirection: "column", gap: "8px", width: "100%" } },
+                    React.createElement(
+                        "div",
+                        { style: { display: "flex", gap: "10px" } },
+                        React.createElement("input", {
+                            value: frm.po,
+                            onChange: (e) => setFrm({ ...frm, po: e.target.value }),
+                            placeholder: "PO Number (e.g. PO-123)",
+                            style: { padding: "6px 8px", borderRadius: "5px", border: `1px solid ${C.bdrMed}`, fontSize: "12px", flex: 1, outline: "none" }
+                        }),
+                        React.createElement("input", {
+                            value: frm.amt,
+                            onChange: (e) => setFrm({ ...frm, amt: e.target.value }),
+                            placeholder: "Amount",
+                            style: { padding: "6px 8px", borderRadius: "5px", border: `1px solid ${C.bdrMed}`, fontSize: "12px", flex: 1, outline: "none" }
+                        })
+                    ),
+                    React.createElement(
+                        "div",
+                        { style: { display: "flex", gap: "7px" } },
+                        React.createElement(
+                            Btn,
+                            { variant: "green", onClick: () => resolveOCR("satisfactory") },
+                            "✓ Satisfactory"
+                        ),
+                        React.createElement(
+                            Btn,
+                            { variant: "red", onClick: () => resolveOCR("not_satisfactory") },
+                            "↺ Request re-upload"
+                        )
+                    )
                 )
             ),
 
@@ -639,12 +663,12 @@ function App() {
                 React.createElement("div", { style: sLabel }, "extracted data"),
                 React.createElement(DataTable, {
                     rows: [
-                        ["PO Number", "PO-123"],
-                        ["Invoice Number", "INV-456"],
-                        ["Vendor", "ABC Ltd"],
-                        ["Amount", "₹50,000"],
-                        ["DC Count", "2"],
-                        ["Total Quantity", "15"],
+                        ["PO Number", ext.po],
+                        ["Invoice Number", ext.inv],
+                        ["Vendor", ext.ven],
+                        ["Amount", ext.amt],
+                        ["DC Count", ext.dc],
+                        ["Total Quantity", ext.qty],
                     ],
                 })
             ),
